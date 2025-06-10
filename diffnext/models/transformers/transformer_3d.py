@@ -19,13 +19,27 @@ from typing import Dict
 
 import torch
 from torch import nn
+import torch.nn.functional as F
 from tqdm import tqdm
-
-
 from ..embeddings import PatchEmbed, PosEmbed, VideoPosEmbed, MaskEmbed, TextEmbed
 from ..vision_transformer import VisionTransformer
 from ..diffusion_mlp import DiffusionMLP
+from einops import rearrange
+import random
 
+def pos_after_rot(x,rot,w):
+    x_exp = x % w
+    x_base = x - x_exp
+    x_new = x_base + (x_exp+rot)%w
+    return x_new
+
+
+def mask_after_rot(x,rot,w):
+    assert x.ndim==3
+    x = rearrange(x,'b (h w) c -> b h w c',w=w)
+    x = torch.concat([x[:,:,-rot:,:],x[:,:,:-rot,:]],dim=2)
+    x = rearrange(x,'b h w c -> b (h w) c')
+    return x
 
 class Transformer3DModel(nn.Module):
 
@@ -192,13 +206,41 @@ class Transformer3DModel(nn.Module):
                 latents.append(states["x"].clone())
         [setattr(blk.attn, "cache_kv", False) for blk in self.video_encoder.blocks]
 
+    def aux_loss(self, z: torch.Tensor, x: torch.Tensor, raw_noise=None, raw_timestep=None):
+        """Return the training losses."""
+        z = z.repeat(self.loss_repeat, *((1,) * (z.dim() - 1)))
+        x = x.repeat(self.loss_repeat, *((1,) * (x.dim() - 1)))
+        x = self.image_encoder.patch_embed.patchify(x)
+        if raw_noise==None:
+            assert raw_timestep==None
+            noise = torch.randn(x.shape, dtype=x.dtype, device=x.device)
+            timestep = self.noise_scheduler.sample_timesteps(z.shape[:2], device=z.device)
+            raw_noise = noise.clone()
+            raw_timestep = timestep.clone()
+        else:
+            noise = raw_noise
+            timestep = raw_timestep
+        x_t = self.noise_scheduler.add_noise(x, noise, timestep)
+        x_t = self.image_encoder.patch_embed.unpatchify(x_t)
+        timestep = getattr(self.noise_scheduler, "timestep", timestep)
+        pred_type = getattr(self.noise_scheduler.config, "prediction_type", "flow")
+        model_pred = self.image_decoder(x_t, timestep, z)
+        model_target = noise.float() if pred_type == "epsilon" else noise.sub(x).float()
+        loss = nn.functional.mse_loss(model_pred.float(), model_target, reduction="none")
+        loss, weight = loss.mean(-1, True), self.mask_embed.mask.to(loss.dtype)
+        weight = weight.repeat(self.loss_repeat, *((1,) * (z.dim() - 1)))
+        loss = loss.mul_(weight).div_(weight.sum().add_(1e-5))
+        return loss.sum(), raw_noise, raw_timestep, model_pred, model_target 
+
+
     def forward_train(self, inputs):
-        """Forward pipeline for training."""
+
         inputs["x"].unsqueeze_(2) if inputs["x"].dim() == 4 else None
         bs, latent_length = inputs["x"].size(0), inputs["x"].size(2)
         c = self.video_encoder.patch_embed(inputs["x"][:, :, : latent_length - 1])
         bov = self.mask_embed.bos_token.expand(bs, 1, c.size(-2), -1)
         c = self.video_pos_embed(torch.cat([bov, c], dim=1))
+
         attn_mask, pos = self.mask_embed.get_attn_mask(c, inputs["c"]), None
         [setattr(blk.attn, "attn_mask", attn_mask) for blk in self.video_encoder.blocks]
         pos = self.video_pos_embed.get_pos(latent_length, bs) if self.image_pos_embed else pos
@@ -206,13 +248,42 @@ class Transformer3DModel(nn.Module):
         if hasattr(self.video_encoder, "mixer") and latent_length > 1:
             c = c.view(bs, latent_length, -1, c.size(-1)).split([1, latent_length - 1], 1)
             c = torch.cat([c[0], self.video_encoder.mixer(*c)], 1)
+
         x = inputs["x"][:, :, :latent_length].transpose(1, 2).flatten(0, 1)
-        z = self.image_encoder.patch_embed(x)
+
+        raw_x = x.clone()  
+        z = self.image_encoder.patch_embed(x)  
         pos = self.image_pos_embed.get_pos(1, bs) if self.image_pos_embed else pos
-        z = self.image_encoder(self.mask_embed(z), c.reshape(bs, -1, c.size(-1)), pos=pos)
-        # 
-        video_shape = (latent_length, z.size(1)) if latent_length > 1 else None
-        return self.get_losses(z, x, video_shape=video_shape)
+        _x,_prev_ids = self.mask_embed(z)
+        z = self.image_encoder(_x, c.reshape(bs, -1, c.size(-1)), _prev_ids, pos=pos)
+
+        loss1, raw_noise, raw_timestep, model_pred, model_target = self.aux_loss(z, x)
+        h,w = self.config.image_base_size
+        oh,ow = raw_x.shape[-2:]
+        r = oh//h
+
+        rot = random.randint(0,w-1)
+        new_x = torch.concat([x[:,:,:,-rot*r:],x[:,:,:,:-rot*r]],dim=-1)
+
+        self.mask_embed.mask = mask_after_rot(self.mask_embed.mask,rot,w)
+        _prev_ids2 = pos_after_rot(_prev_ids,rot,w)
+        new_noise = mask_after_rot(raw_noise,rot,w)
+        new_timestep = mask_after_rot(raw_timestep[:,:,None],rot,w).squeeze(2)
+    
+        z2 = self.image_encoder.patch_embed(new_x)   
+        pos = self.image_pos_embed.get_pos(1, bs) if self.image_pos_embed else pos
+        _x2 = z2.mul(1 - self.mask_embed.mask).add_(self.mask_embed.mask_token * self.mask_embed.mask)
+        z2 = self.image_encoder(_x2, c.reshape(bs, -1, c.size(-1)), _prev_ids2, pos=pos)
+        loss2, _, _, model_pred2, model_target2 = self.aux_loss(z2, new_x, new_noise, new_timestep)
+
+        model_pred1_rot = mask_after_rot(model_pred,rot,w)
+        weight = self.mask_embed.mask.repeat(self.loss_repeat, *((1,) * (z.dim() - 1)))
+
+        _loss2_aux = F.mse_loss(model_pred1_rot,model_pred2,reduction="none")
+        loss2_aux = _loss2_aux.mul(weight).div(weight.sum().add(1e-5)).sum()
+        loss = loss1 + 0.1*loss2_aux
+        return {"loss": loss, "loss1":loss1, "loss2":loss2_aux}
+
 
     def forward(self, inputs):
         """Define the computation performed at every call."""
@@ -223,3 +294,4 @@ class Transformer3DModel(nn.Module):
         inputs["latents"] = inputs.pop("latents", [])
         self.generate_video(inputs)
         return {"x": torch.stack(inputs["latents"], dim=2)}
+

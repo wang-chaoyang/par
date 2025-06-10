@@ -1,0 +1,60 @@
+ptr: data/pretrain/nova-d48w768-sdxl1024
+resume: latest
+eval_only: False
+ 
+zpad: 8
+h: 512
+w: 1024
+
+path: data/Matterport3D/mp3d_skybox
+textpath: data/Matterport3D/caption
+
+env:
+   o: work_dirs/par
+   log: 'log'
+   report_to: 'tensorboard'
+   grad_accu: 1
+   seed: 123
+   mp: 'no'
+   dpsd: True
+   tf32: False
+   scale_lr: False
+   use_xformers: False
+   ema: False
+   its: 20000
+   max_grad_norm: 1.0
+   sv_its: 5000
+   size: 512
+   ckpt_num: 4
+   quickval: 1
+   onlyw: false
+
+train:
+   bs: 4
+   workers: 8
+   find_unused_parameters: False
+   gradient_checkpointing: False
+
+eval:
+   bs: 4
+   workers: 4
+   cfg: 5
+
+optim:
+   n: adamw
+   lr: 5.0e-5
+   beta1: 0.9
+   beta2: 0.999
+   wd: 0.01
+   eps: 1.0e-08
+
+lr_sch:
+   n: linear
+   final_lr: 0.000001
+   warm: 500
+
+aug:
+   shift: True
+
+
+

@@ -28,7 +28,20 @@ Install other pip packages via `pip install -r requirements.txt`.
 
 Download the [pre-trained model](https://github.com/baaivision/NOVA/blob/main/docs/model_zoo.md) and put them under `data/pretrain`.
 
-
+We use [Matterport3D](https://niessner.github.io/Matterport) in our experiments and follow [PanFusion](https://github.com/chengzhag/PanFusion) for data preparation. The data should be organized as follows.
+```
+data
+├── Matterport3D
+│   ├── mp3d_skybox
+│   │   ├── 1LXtFkjw3qL
+│   │       ├── matterport_skybox_images
+│   │       └── matterport_stitched_images   
+│   │   ├── train.npy   
+│   │   └── test.npy  
+│   └── caption
+│       ├── 1LXtFkjw3qL_0b22fa63d0f54a529c525afbf2e8bb25.txt
+└── pretrain
+```
 
 ## Demo
 
@@ -39,6 +52,16 @@ Download the [checkpoint](https://huggingface.co/chaoyangw/par/blob/main/par_w10
 accelerate launch scripts/demo.py --ptr data/pretrain/nova-d48w1024-sdxl1024 --ckpt data/pretrain/ckpt/par_w1024.pt --prompt=[Prompt]
 ```
 
+## Train
+The codes in [scripts](scripts/train.py) is launched by accelerate. The images and captions are specified by `path` and `textpath`, respectively.
+```
+accelerate launch scripts/train.py configs/cfg.yaml ptr=[ptr] path=[path] textpath=[textpath] env.o=[project path]
+```
+
+## Inference
+```
+accelerate launch scripts/train.py configs/cfg.yaml ptr=[ptr] path=[path] textpath=[textpath] env.o=[project path] eval_only=true 
+```
 
 
 ## Citation

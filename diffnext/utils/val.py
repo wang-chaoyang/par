@@ -7,8 +7,46 @@ import os.path as osp
 import numpy as np
 from typing import List
 from PIL import Image
-import datetime
-import shutil
+
+
+
+def saveims(images,batch,args,gstep,folder=None):
+    prompts = batch['text']
+    metas = batch['meta']
+    for i in range(len(prompts)):
+        if not args.eval_only and folder==None:
+            name = prompts[i].replace(' ','_')[:30]
+            images[i].save(osp.join(args.env.o,'vis',f'it-{gstep}-{name}.jpg'))
+        else:
+            folder_name = 'test' if folder is None else folder
+            id1, id2 = metas[i]['id1'], metas[i]['id2']
+            impath = osp.join(args.env.o,folder_name,f'{id1}_{id2}')
+            os.makedirs(impath,exist_ok=True)
+            images[i].save(osp.join(impath,f'eval-it-{gstep}.png'))
+            with open(osp.join(impath,'prompt.txt'),'w') as f:
+                f.write(prompts[i])
+
+
+@torch.no_grad()
+def val_fn(
+        accelerator,
+        args,
+        vae,
+        transformer,
+        val_dataloader,
+        weight_dtype,
+        gstep,
+        ):
+    transformer.eval()
+    pipe = DummyInferImage(
+                           transformer.module if hasattr(transformer,'module') else transformer,
+                           vae,args)
+    for idx, batch in enumerate(val_dataloader):
+        images = pipe(batch['text'], guidance_scale=args.eval.cfg).images
+        saveims(images,batch,args,gstep)
+
+    [setattr(blk.attn, "cache_kv", None) for blk in transformer.video_encoder.blocks]
+
 
 
 class DummyInferImage:

@@ -8,3 +8,4 @@ torchmetrics
 torch-fidelity
 omegaconf
 transformers==4.48.2
+tensorboard
