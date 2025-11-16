@@ -10,7 +10,7 @@
 
 <div>
   <p align="center" style="font-size: larger;">
-    <strong>Arxiv</strong>
+    <strong>NeurIPS 2025</strong>
   </p>
 </div>
 
